@@ -6,6 +6,7 @@ from typing import Optional, List, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import re
+import json
 
 from .models import PlaylistMetadata, VideoMetadata, DownloadStatus, VideoStatus
 from .auth import AuthManager
@@ -78,8 +79,15 @@ class DownloadManager:
 
     def get_playlist_download_dir(self, playlist: PlaylistMetadata) -> Path:
         """Get download directory for a specific playlist."""
+        # Create human-friendly folder name: "Channel - PlaylistName"
+        channel_name = playlist.channel or playlist.uploader or "Unknown Channel"
+        safe_channel = sanitize_filename(channel_name)
         safe_title = sanitize_filename(playlist.title)
-        playlist_dir = self.download_dir / safe_title
+
+        # Combine channel and playlist name
+        folder_name = f"{safe_channel} - {safe_title}"
+
+        playlist_dir = self.download_dir / folder_name
         playlist_dir.mkdir(parents=True, exist_ok=True)
         return playlist_dir
 
@@ -316,3 +324,140 @@ class DownloadManager:
         self.storage.save_playlist(playlist)
 
         return results
+
+    def download_comments(
+        self,
+        video: VideoMetadata,
+        output_dir: Path
+    ) -> bool:
+        """
+        Download and save all comments for a video as markdown.
+
+        Args:
+            video: VideoMetadata object
+            output_dir: Directory to save the comments file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if video.status != VideoStatus.LIVE:
+            print(f"Skipping comments for {video.title} - Status: {video.status.value}")
+            return False
+
+        # Create filename with playlist index
+        safe_title = sanitize_filename(video.title)
+        index_str = f"{video.playlist_index:03d}"
+        filename_base = f"{index_str} - {safe_title}"
+        comments_file = output_dir / f"{filename_base}_comments.md"
+
+        # Skip if comments already downloaded
+        if comments_file.exists():
+            print(f"Comments already exist for: {video.title}")
+            video.comments_path = str(comments_file)
+            return True
+
+        # Configure yt-dlp to extract comments
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'getcomments': True,
+            'ignoreerrors': True,
+        }
+
+        # Add authentication
+        auth_params = self.auth_manager.get_ytdlp_params()
+        ydl_opts.update(auth_params)
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                video_url = video.webpage_url or f"https://www.youtube.com/watch?v={video.video_id}"
+                print(f"Downloading comments for: {video.title}")
+
+                info = ydl.extract_info(video_url, download=False)
+
+                if not info:
+                    print(f"Failed to extract info for: {video.title}")
+                    return False
+
+                comments = info.get('comments', [])
+
+                if not comments:
+                    print(f"No comments found for: {video.title}")
+                    # Still create an empty file to mark as checked
+                    self._write_comments_markdown(comments_file, video, [])
+                    video.comments_path = str(comments_file)
+                    return True
+
+                # Write comments to markdown
+                self._write_comments_markdown(comments_file, video, comments)
+                video.comments_path = str(comments_file)
+
+                print(f"Downloaded {len(comments)} comments for: {video.title}")
+                return True
+
+        except Exception as e:
+            print(f"Error downloading comments for {video.title}: {e}")
+            return False
+
+    def _write_comments_markdown(
+        self,
+        filepath: Path,
+        video: VideoMetadata,
+        comments: List[Dict[str, Any]]
+    ):
+        """
+        Write comments to a markdown file.
+
+        Args:
+            filepath: Path to the markdown file
+            video: VideoMetadata object
+            comments: List of comment dictionaries from yt-dlp
+        """
+        with open(filepath, 'w', encoding='utf-8') as f:
+            # Write header
+            f.write(f"# Comments for: {video.title}\n\n")
+            f.write(f"**Channel:** {video.channel}\n")
+            f.write(f"**Video ID:** {video.video_id}\n")
+            f.write(f"**Video URL:** {video.webpage_url}\n")
+            f.write(f"**Downloaded:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"**Total Comments:** {len(comments)}\n\n")
+            f.write("---\n\n")
+
+            if not comments:
+                f.write("*No comments available for this video.*\n")
+                return
+
+            # Write each comment
+            for i, comment in enumerate(comments, 1):
+                author = comment.get('author', 'Unknown')
+                text = comment.get('text', '')
+                timestamp = comment.get('timestamp')
+                like_count = comment.get('like_count', 0)
+                is_favorited = comment.get('is_favorited', False)
+                parent = comment.get('parent', 'root')
+
+                # Format timestamp if available
+                time_str = ""
+                if timestamp:
+                    try:
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        time_str = str(timestamp)
+
+                # Determine if this is a reply
+                indent = ""
+                if parent != 'root':
+                    indent = "  > "
+
+                # Write comment
+                f.write(f"{indent}## Comment #{i}\n\n")
+                f.write(f"{indent}**Author:** {author}\n")
+                if time_str:
+                    f.write(f"{indent}**Date:** {time_str}\n")
+                f.write(f"{indent}**Likes:** {like_count}\n")
+                if is_favorited:
+                    f.write(f"{indent}**⭐ Favorited by creator**\n")
+                f.write(f"\n{indent}{text}\n\n")
+                f.write(f"{indent}---\n\n")

@@ -26,10 +26,48 @@ class PlaylistStorage:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def get_playlist_dir(self, playlist_id: str) -> Path:
-        """Get the directory for a specific playlist."""
+        """
+        Get the directory for a specific playlist.
+
+        Uses human-friendly folder name format: "Channel - PlaylistName"
+        If playlist doesn't exist yet, creates folder with playlist_id temporarily.
+        """
+        # First try to find existing folder by searching current_state.json files
+        for playlist_dir in self.base_dir.iterdir():
+            if playlist_dir.is_dir():
+                state_file = playlist_dir / 'current_state.json'
+                if state_file.exists():
+                    try:
+                        with open(state_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            if data.get('playlist_id') == playlist_id:
+                                return playlist_dir
+                    except Exception:
+                        continue
+
+        # Playlist not found - create new folder with playlist_id as temporary name
+        # It will be renamed when saved with full metadata
         playlist_dir = self.base_dir / playlist_id
         playlist_dir.mkdir(parents=True, exist_ok=True)
         return playlist_dir
+
+    def _get_human_friendly_folder_name(self, playlist: PlaylistMetadata) -> str:
+        """
+        Generate human-friendly folder name: "Channel - PlaylistName"
+
+        Args:
+            playlist: PlaylistMetadata object
+
+        Returns:
+            Sanitized folder name
+        """
+        from .downloader import sanitize_filename
+
+        channel_name = playlist.channel or playlist.uploader or "Unknown Channel"
+        safe_channel = sanitize_filename(channel_name)
+        safe_title = sanitize_filename(playlist.title)
+
+        return f"{safe_channel} - {safe_title}"
 
     def get_current_state_file(self, playlist_id: str) -> Path:
         """Get path to the current state JSON file."""
@@ -87,7 +125,35 @@ class PlaylistStorage:
         if create_version:
             self._create_version_snapshot(playlist, previous_playlist)
 
-        print(f"Playlist saved: {state_file}")
+        # Rename folder to human-friendly name if needed
+        new_folder_name = self._get_human_friendly_folder_name(playlist)
+        new_playlist_dir = self.base_dir / new_folder_name
+
+        # Only rename if the name is different and new name doesn't exist
+        if playlist_dir.name != new_folder_name:
+            if not new_playlist_dir.exists():
+                try:
+                    playlist_dir.rename(new_playlist_dir)
+                    print(f"Playlist saved and renamed to: {new_folder_name}")
+                except Exception as e:
+                    print(f"Playlist saved: {state_file} (Could not rename folder: {e})")
+            else:
+                # Target folder exists - could be a naming collision
+                # Check if it's the same playlist
+                try:
+                    with open(new_playlist_dir / 'current_state.json', 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                        if existing_data.get('playlist_id') == playlist.playlist_id:
+                            # Same playlist, remove old folder and keep the new one
+                            shutil.rmtree(playlist_dir)
+                            print(f"Playlist saved: {new_playlist_dir / 'current_state.json'}")
+                        else:
+                            # Different playlist with same name - keep old folder name
+                            print(f"Playlist saved: {state_file} (Folder name collision prevented)")
+                except Exception as e:
+                    print(f"Playlist saved: {state_file} (Error handling folder rename: {e})")
+        else:
+            print(f"Playlist saved: {state_file}")
 
     def _create_version_snapshot(
         self,
@@ -266,7 +332,7 @@ class PlaylistStorage:
         List all stored playlists.
 
         Returns:
-            List of dictionaries with playlist_id, title, and last_updated
+            List of dictionaries with playlist_id, title, channel, and last_updated
         """
         playlists = []
 
@@ -280,6 +346,7 @@ class PlaylistStorage:
                             playlists.append({
                                 'playlist_id': data.get('playlist_id', ''),
                                 'title': data.get('title', 'Unknown'),
+                                'channel': data.get('channel') or data.get('uploader', 'Unknown'),
                                 'last_updated': data.get('last_updated', ''),
                                 'video_count': len(data.get('videos', {})),
                             })
@@ -304,3 +371,98 @@ class PlaylistStorage:
             json.dump(playlist.to_dict(), f, indent=2, ensure_ascii=False)
 
         print(f"Playlist exported to: {output_file}")
+
+    def delete_playlist(self, playlist_id: str) -> bool:
+        """
+        Delete a playlist and all its associated data.
+
+        Args:
+            playlist_id: YouTube playlist ID
+
+        Returns:
+            True if successful, False otherwise
+        """
+        playlist_dir = self.get_playlist_dir(playlist_id)
+
+        if not playlist_dir.exists():
+            print(f"Playlist {playlist_id} not found")
+            return False
+
+        try:
+            # Delete the entire playlist directory
+            shutil.rmtree(playlist_dir)
+            print(f"Playlist deleted: {playlist_id}")
+            return True
+        except Exception as e:
+            print(f"Error deleting playlist {playlist_id}: {e}")
+            return False
+
+    def migrate_to_human_friendly_names(self) -> None:
+        """
+        Migrate all existing playlist folders to human-friendly names.
+
+        Renames folders from playlist IDs to "Channel - PlaylistName" format.
+        """
+        print("\n=== Migrating Playlist Folders to Human-Friendly Names ===\n")
+
+        migrated_count = 0
+        error_count = 0
+
+        for playlist_dir in self.base_dir.iterdir():
+            if not playlist_dir.is_dir():
+                continue
+
+            state_file = playlist_dir / 'current_state.json'
+            if not state_file.exists():
+                continue
+
+            try:
+                # Load playlist data
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                playlist = PlaylistMetadata.from_dict(data)
+
+                # Get new folder name
+                new_folder_name = self._get_human_friendly_folder_name(playlist)
+                new_playlist_dir = self.base_dir / new_folder_name
+
+                # Check if rename is needed
+                if playlist_dir.name == new_folder_name:
+                    print(f"[OK] Already migrated: {new_folder_name}")
+                    continue
+
+                # Check if target exists
+                if new_playlist_dir.exists():
+                    # Check if it's the same playlist
+                    try:
+                        with open(new_playlist_dir / 'current_state.json', 'r', encoding='utf-8') as f:
+                            existing_data = json.load(f)
+                            if existing_data.get('playlist_id') == playlist.playlist_id:
+                                # Same playlist, remove old folder
+                                shutil.rmtree(playlist_dir)
+                                print(f"[OK] Merged duplicate: {playlist_dir.name} -> {new_folder_name}")
+                                migrated_count += 1
+                                continue
+                            else:
+                                print(f"[ERROR] Naming collision: {playlist_dir.name} conflicts with {new_folder_name}")
+                                error_count += 1
+                                continue
+                    except Exception as e:
+                        print(f"[ERROR] Error checking existing folder {new_folder_name}: {e}")
+                        error_count += 1
+                        continue
+
+                # Rename folder
+                playlist_dir.rename(new_playlist_dir)
+                print(f"[OK] Migrated: {playlist_dir.name} -> {new_folder_name}")
+                migrated_count += 1
+
+            except Exception as e:
+                print(f"[ERROR] Error migrating {playlist_dir.name}: {e}")
+                error_count += 1
+
+        print(f"\n=== Migration Complete ===")
+        print(f"Migrated: {migrated_count}")
+        print(f"Errors: {error_count}")
+        print()

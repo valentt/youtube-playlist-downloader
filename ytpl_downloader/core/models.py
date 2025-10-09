@@ -63,6 +63,7 @@ class VideoMetadata:
     # File paths
     video_path: Optional[str] = None
     audio_path: Optional[str] = None
+    comments_path: Optional[str] = None
 
     # Timestamps
     first_seen: str = field(default_factory=lambda: datetime.now().isoformat())
