@@ -1,6 +1,8 @@
 """Graphical user interface for YouTube playlist downloader."""
 
 import sys
+import os
+import subprocess
 import webbrowser
 from pathlib import Path
 from typing import Optional, List
@@ -18,7 +20,8 @@ from ..core.auth import AuthManager
 from ..core.playlist_fetcher import PlaylistFetcher
 from ..core.storage import PlaylistStorage
 from ..core.downloader import DownloadManager
-from ..core.models import PlaylistMetadata, VideoStatus, DownloadStatus
+from ..core.archiver import ArchiveManager
+from ..core.models import PlaylistMetadata, VideoStatus, DownloadStatus, ArchiveStatus
 
 
 class FetchThread(QThread):
@@ -195,6 +198,75 @@ class SingleVideoDownloadThread(QThread):
             self.error.emit(str(e))
 
 
+class ArchiveThread(QThread):
+    """Background thread for archiving videos to archive.org."""
+    finished = Signal(dict)  # {video_id: (success, message)}
+    error = Signal(str)
+    progress = Signal(int, int, str)  # current, total, message
+    video_started = Signal(str)  # video_id
+    video_finished = Signal(str, bool, str)  # video_id, success, message
+    file_progress = Signal(str, int, int, float, int, str)  # filename, bytes_sent, total_bytes, speed_mbps, percent, status
+
+    def __init__(self, archiver: ArchiveManager, storage: PlaylistStorage,
+                 playlist: PlaylistMetadata, video_ids: List[str]):
+        super().__init__()
+        self.archiver = archiver
+        self.storage = storage
+        self.playlist = playlist
+        self.video_ids = video_ids
+        self.stop_requested = False
+
+    def request_stop(self):
+        """Request graceful stop after current upload."""
+        self.stop_requested = True
+
+    def run(self):
+        try:
+            results = {}
+            total = len(self.video_ids)
+
+            for i, video_id in enumerate(self.video_ids):
+                if self.stop_requested:
+                    break
+
+                video = self.playlist.videos.get(video_id)
+                if not video:
+                    continue
+
+                self.video_started.emit(video_id)
+                self.progress.emit(i, total, f"Archiving {i}/{total}: {video.title[:50]}")
+
+                # Get file paths
+                from pathlib import Path
+                video_path = Path(video.video_path) if video.video_path else None
+                audio_path = Path(video.audio_path) if video.audio_path else None
+                comments_path = Path(video.comments_path) if video.comments_path else None
+
+                # Progress callback for file uploads
+                def progress_callback(filename: str, bytes_sent: int, total_bytes: int, speed_mbps: float, percent: int, status: str):
+                    self.file_progress.emit(filename, bytes_sent, total_bytes, speed_mbps, percent, status)
+
+                # Upload (skip_live=False means archive LIVE videos too)
+                success, message = self.archiver.upload_video(
+                    video, self.playlist,
+                    video_path, audio_path, comments_path,
+                    skip_live=False,  # Allow archiving LIVE videos
+                    progress_callback=progress_callback  # Show file upload progress
+                )
+
+                results[video_id] = (success, message)
+                self.video_finished.emit(video_id, success, message)
+
+                # Save after each upload
+                self.storage.save_playlist(self.playlist, create_version=False)
+
+                self.progress.emit(i + 1, total, f"Archived {i + 1}/{total}")
+
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
 
@@ -208,6 +280,7 @@ class MainWindow(QMainWindow):
         self.storage = PlaylistStorage()
         self.fetcher = PlaylistFetcher(self.auth_manager)
         self.downloader = DownloadManager(self.auth_manager, self.storage)
+        self.archiver = ArchiveManager(self.storage)
 
         # Current playlist
         self.current_playlist: Optional[PlaylistMetadata] = None
@@ -226,20 +299,20 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         # Create tabs
-        tabs = QTabWidget()
-        main_layout.addWidget(tabs)
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
 
         # Tab 1: Playlists
         self.playlist_tab = self.create_playlist_tab()
-        tabs.addTab(self.playlist_tab, "Playlists")
+        self.tabs.addTab(self.playlist_tab, "Playlists")
 
         # Tab 2: Videos
         self.videos_tab = self.create_videos_tab()
-        tabs.addTab(self.videos_tab, "Videos")
+        self.tabs.addTab(self.videos_tab, "Videos")
 
         # Tab 3: Settings
         self.settings_tab = self.create_settings_tab()
-        tabs.addTab(self.settings_tab, "Settings")
+        self.tabs.addTab(self.settings_tab, "Settings")
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -298,6 +371,7 @@ class MainWindow(QMainWindow):
         self.playlists_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlists_table.customContextMenuRequested.connect(self.show_playlist_context_menu)
         self.playlists_table.itemSelectionChanged.connect(self.on_playlist_selected)
+        self.playlists_table.itemDoubleClicked.connect(self.on_playlist_double_clicked)
         playlists_layout.addWidget(self.playlists_table)
 
         buttons_layout = QHBoxLayout()
@@ -351,8 +425,8 @@ class MainWindow(QMainWindow):
 
         # Videos table
         self.videos_table = QTableWidget()
-        self.videos_table.setColumnCount(8)
-        self.videos_table.setHorizontalHeaderLabels(["#", "Video ID", "Title", "Channel", "Status", "Video DL", "Audio DL", "Comments"])
+        self.videos_table.setColumnCount(9)
+        self.videos_table.setHorizontalHeaderLabels(["#", "Video ID", "Title", "Channel", "Status", "Video DL", "Audio DL", "Comments", "Archive"])
         self.videos_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.videos_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.videos_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -442,6 +516,9 @@ class MainWindow(QMainWindow):
         cookies_button = QPushButton("Set Cookies")
         cookies_button.clicked.connect(self.set_cookies)
         cookies_layout.addWidget(cookies_button)
+        clear_cookies_button = QPushButton("Clear")
+        clear_cookies_button.clicked.connect(self.clear_cookies)
+        cookies_layout.addWidget(clear_cookies_button)
         cookies_layout.addStretch()
         auth_layout.addLayout(cookies_layout)
 
@@ -453,8 +530,22 @@ class MainWindow(QMainWindow):
         oauth_button = QPushButton("Setup OAuth")
         oauth_button.clicked.connect(self.setup_oauth)
         oauth_layout.addWidget(oauth_button)
+        clear_oauth_button = QPushButton("Clear")
+        clear_oauth_button.clicked.connect(self.clear_oauth)
+        oauth_layout.addWidget(clear_oauth_button)
         oauth_layout.addStretch()
         auth_layout.addLayout(oauth_layout)
+
+        # Archive.org
+        archive_layout = QHBoxLayout()
+        archive_layout.addWidget(QLabel("Archive.org:"))
+        self.archive_status_label = QLabel("Not configured")
+        archive_layout.addWidget(self.archive_status_label)
+        archive_button = QPushButton("Configure")
+        archive_button.clicked.connect(self.configure_archive_org)
+        archive_layout.addWidget(archive_button)
+        archive_layout.addStretch()
+        auth_layout.addLayout(archive_layout)
 
         layout.addWidget(auth_group)
 
@@ -558,6 +649,31 @@ class MainWindow(QMainWindow):
     def on_playlist_selected(self):
         """Handle playlist selection."""
         pass  # Selection handled, load button will use it
+
+    def on_playlist_double_clicked(self, item):
+        """Handle double-click on playlist - load and switch to Videos tab."""
+        if not item:
+            return
+
+        row = item.row()
+        # Get playlist_id from user data (stored in column 0)
+        playlist_id = self.playlists_table.item(row, 0).data(Qt.UserRole)
+
+        if not playlist_id:
+            return
+
+        # Load the playlist
+        playlist = self.storage.load_playlist(playlist_id)
+        if playlist:
+            self.current_playlist = playlist
+            self.display_playlist()
+            self.log(f"Loaded playlist: {playlist.title}")
+
+            # Switch to Videos tab (index 1)
+            self.tabs.setCurrentIndex(1)
+            self.statusBar().showMessage(f"Loaded: {playlist.title}")
+        else:
+            QMessageBox.critical(self, "Error", "Failed to load playlist")
 
     def load_selected_playlist(self):
         """Load the selected playlist."""
@@ -788,6 +904,33 @@ class MainWindow(QMainWindow):
                 comments_dl_item.setForeground(QColor("green"))
             self.videos_table.setItem(row, 7, comments_dl_item)
 
+            # Archive status
+            archive_item = QTableWidgetItem()
+            if video.archive_status == ArchiveStatus.ARCHIVED:
+                archive_item.setText("✓")
+                archive_item.setForeground(QColor("green"))
+                if video.archive_url:
+                    archive_item.setToolTip(f"Archived at: {video.archive_url}")
+            elif video.archive_status == ArchiveStatus.UPLOADING:
+                archive_item.setText("⟳")
+                archive_item.setForeground(QColor("blue"))
+                archive_item.setToolTip("Upload in progress")
+            elif video.archive_status == ArchiveStatus.FAILED:
+                archive_item.setText("✗")
+                archive_item.setForeground(QColor("red"))
+                if video.archive_error:
+                    archive_item.setToolTip(f"Failed: {video.archive_error}")
+            elif video.archive_status == ArchiveStatus.SKIPPED:
+                archive_item.setText("⊘")
+                archive_item.setForeground(QColor("orange"))
+                if video.archive_url:
+                    archive_item.setToolTip(f"Already exists: {video.archive_url}")
+            else:
+                archive_item.setText("○")
+                archive_item.setForeground(QColor("gray"))
+                archive_item.setToolTip("Not archived")
+            self.videos_table.setItem(row, 8, archive_item)
+
     def download_playlist(self):
         """Download the current playlist."""
         if not self.current_playlist:
@@ -947,8 +1090,41 @@ class MainWindow(QMainWindow):
         download_comments_action = menu.addAction("Download Comments for This Video")
         menu.addSeparator()
 
+        # Open file options (only show if files exist)
+        video = self.current_playlist.videos.get(video_id)
+        open_video_action = None
+        open_audio_action = None
+        open_comments_action = None
+
+        if video:
+            if video.video_path and Path(video.video_path).exists():
+                open_video_action = menu.addAction("Open Video File")
+            if video.audio_path and Path(video.audio_path).exists():
+                open_audio_action = menu.addAction("Open Audio File")
+            if video.comments_path and Path(video.comments_path).exists():
+                open_comments_action = menu.addAction("Open Comments File")
+
+            if open_video_action or open_audio_action or open_comments_action:
+                menu.addSeparator()
+
         # Metadata option
         enrich_action = menu.addAction("Get Detailed Metadata for This Video")
+        menu.addSeparator()
+
+        # Archive options
+        if video:
+            if video.archive_status == ArchiveStatus.ARCHIVED and video.archive_url:
+                open_archive_action = menu.addAction("Open on Archive.org")
+            else:
+                open_archive_action = None
+
+            archive_action = menu.addAction("Archive to Archive.org")
+
+            if video.archive_status == ArchiveStatus.FAILED:
+                archive_action.setText("Retry Archive Upload")
+        else:
+            open_archive_action = None
+            archive_action = None
 
         # Show menu and handle action
         action = menu.exec_(self.videos_table.viewport().mapToGlobal(position))
@@ -959,8 +1135,18 @@ class MainWindow(QMainWindow):
             self.download_single_video(video_id, audio_only=True)
         elif action == download_comments_action:
             self.download_single_video_comments(video_id)
+        elif open_video_action and action == open_video_action:
+            self.open_file_with_default_app(video.video_path)
+        elif open_audio_action and action == open_audio_action:
+            self.open_file_with_default_app(video.audio_path)
+        elif open_comments_action and action == open_comments_action:
+            self.open_file_with_default_app(video.comments_path)
         elif action == enrich_action:
             self.enrich_single_video(video_id)
+        elif open_archive_action and action == open_archive_action:
+            self.open_archive_url(video)
+        elif archive_action and action == archive_action:
+            self.archive_single_video(video_id)
 
     def download_single_video(self, video_id: str, audio_only: bool = False):
         """Download a single video."""
@@ -1094,6 +1280,11 @@ class MainWindow(QMainWindow):
                 detailed.video_path = video.video_path
                 detailed.audio_path = video.audio_path
                 detailed.comments_path = video.comments_path
+                detailed.archive_status = video.archive_status
+                detailed.archive_identifier = video.archive_identifier
+                detailed.archive_url = video.archive_url
+                detailed.archive_date = video.archive_date
+                detailed.archive_error = video.archive_error
                 detailed.first_seen = video.first_seen
                 detailed.status_history = video.status_history
                 detailed.playlist_index = video.playlist_index
@@ -1133,6 +1324,239 @@ class MainWindow(QMainWindow):
                 f"Failed to fetch video metadata:\n{str(e)}"
             )
 
+    def open_file_with_default_app(self, file_path: str):
+        """Open a file with the default OS application."""
+        if not file_path:
+            return
+
+        filepath = Path(file_path)
+        if not filepath.exists():
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The file does not exist:\n{file_path}"
+            )
+            return
+
+        try:
+            # Use OS-specific commands to open with default application
+            if sys.platform == 'win32':
+                os.startfile(filepath)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.call(['open', str(filepath)])
+            else:  # Linux and other Unix-like
+                subprocess.call(['xdg-open', str(filepath)])
+
+            self.log(f"Opened file: {filepath.name}")
+            self.statusBar().showMessage(f"Opened {filepath.name}")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to open file:\n{str(e)}"
+            )
+
+    def open_archive_url(self, video):
+        """Open archived video URL in browser."""
+        if not video or not video.archive_url:
+            QMessageBox.warning(
+                self,
+                "No URL",
+                "This video doesn't have an archive.org URL."
+            )
+            return
+
+        try:
+            webbrowser.open(video.archive_url)
+            self.log(f"Opened archive.org URL: {video.title}")
+            self.statusBar().showMessage("Opened archive in browser")
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to open URL in browser:\n{str(e)}"
+            )
+
+    def archive_single_video(self, video_id: str):
+        """Archive a single video to archive.org."""
+        if not self.current_playlist or video_id not in self.current_playlist.videos:
+            return
+
+        video = self.current_playlist.videos[video_id]
+
+        # Check if archive.org is configured
+        if not self.auth_manager.has_archive_org():
+            reply = QMessageBox.question(
+                self,
+                "Configure Archive.org",
+                "Archive.org credentials are not configured.\n\n"
+                "Would you like to configure them now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.configure_archive_org()
+            return
+
+        self.statusBar().showMessage(f"Archiving: {video.title[:50]}...")
+        self.log(f"Archiving video to archive.org: {video.title}")
+
+        # Start archive thread with single video
+        self.archive_thread = ArchiveThread(
+            self.archiver, self.storage, self.current_playlist, [video_id]
+        )
+        self.archive_thread.finished.connect(self.on_archive_finished)
+        self.archive_thread.error.connect(self.on_archive_error)
+        self.archive_thread.file_progress.connect(self.on_archive_file_progress)
+        self.archive_thread.start()
+
+    def on_archive_file_progress(self, filename: str, bytes_sent: int, total_bytes: int, speed_mbps: float, percent: int, status: str):
+        """Handle file upload progress updates."""
+        # Format size
+        from ..core.archiver import format_file_size
+        sent_str = format_file_size(bytes_sent)
+        total_str = format_file_size(total_bytes)
+
+        # Build status message based on phase
+        if status == "Caching":
+            status_msg = f"{status} {filename}: {percent}%"
+        else:
+            # Uploading phase - show speed and ETA
+            if speed_mbps > 0:
+                remaining_mb = (total_bytes - bytes_sent) / (1024 * 1024)
+                eta_seconds = int(remaining_mb / speed_mbps)
+                if eta_seconds < 60:
+                    eta_str = f"{eta_seconds}s"
+                else:
+                    eta_minutes = eta_seconds // 60
+                    eta_str = f"{eta_minutes}m {eta_seconds % 60}s"
+            else:
+                eta_str = "calculating..."
+
+            status_msg = f"{status} {filename}: {percent}% ({sent_str}/{total_str}) @ {speed_mbps:.1f} MB/s - ETA: {eta_str}"
+
+        # Update status bar
+        self.statusBar().showMessage(status_msg)
+
+    def on_archive_finished(self, results: dict):
+        """Handle archive completion."""
+        successful = sum(1 for success, _ in results.values() if success)
+        total = len(results)
+
+        # Reload playlist to get updated archive status
+        if self.current_playlist:
+            reloaded = self.storage.load_playlist(self.current_playlist.playlist_id)
+            if reloaded:
+                self.current_playlist = reloaded
+
+        # Refresh display
+        self.display_playlist()
+
+        if successful > 0:
+            self.log(f"Archive complete: {successful}/{total} successful")
+            self.statusBar().showMessage("Archive complete")
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Archive complete!\n{successful}/{total} videos archived successfully"
+            )
+        else:
+            # Show errors
+            messages = []
+            for vid_id, (success, message) in results.items():
+                if not success:
+                    video = self.current_playlist.videos.get(vid_id)
+                    title = video.title if video else vid_id
+                    messages.append(f"• {title}: {message}")
+
+            self.log(f"Archive failed: {total} videos")
+            self.statusBar().showMessage("Archive failed")
+            QMessageBox.warning(
+                self,
+                "Archive Failed",
+                f"Failed to archive {total} video(s):\n\n" + "\n".join(messages[:5])
+            )
+
+    def on_archive_error(self, error: str):
+        """Handle archive error."""
+        self.log(f"Archive error: {error}")
+        self.statusBar().showMessage("Archive failed")
+        QMessageBox.critical(self, "Error", f"Archive failed:\n{error}")
+
+        # Reload and refresh
+        if self.current_playlist:
+            reloaded = self.storage.load_playlist(self.current_playlist.playlist_id)
+            if reloaded:
+                self.current_playlist = reloaded
+        self.display_playlist()
+
+    def configure_archive_org(self):
+        """Configure archive.org credentials via dialog."""
+        from PySide6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure Archive.org")
+        dialog.setModal(True)
+
+        layout = QFormLayout(dialog)
+
+        # Instructions
+        instructions = QLabel(
+            "Enter your Archive.org S3 API credentials.\n\n"
+            "You can get these from: https://archive.org/account/s3.php\n\n"
+            "These will be saved to ~/.config/ia.ini"
+        )
+        instructions.setWordWrap(True)
+        layout.addRow(instructions)
+
+        # Access key
+        access_input = QLineEdit()
+        access_input.setPlaceholderText("Enter your access key")
+        layout.addRow("Access Key:", access_input)
+
+        # Secret key
+        secret_input = QLineEdit()
+        secret_input.setEchoMode(QLineEdit.Password)
+        secret_input.setPlaceholderText("Enter your secret key")
+        layout.addRow("Secret Key:", secret_input)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            access_key = access_input.text().strip()
+            secret_key = secret_input.text().strip()
+
+            if not access_key or not secret_key:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Both access key and secret key are required."
+                )
+                return
+
+            try:
+                self.auth_manager.configure_archive_org(access_key, secret_key)
+                self.log("Archive.org credentials configured successfully")
+                self.update_auth_status()
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Archive.org credentials configured successfully!"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to configure archive.org:\n{str(e)}"
+                )
+
     def set_cookies(self):
         """Set cookies file."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1163,6 +1587,57 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to setup OAuth:\n{str(e)}")
 
+    def clear_cookies(self):
+        """Clear cookies file."""
+        reply = QMessageBox.question(
+            self,
+            "Clear Cookies",
+            "Are you sure you want to clear the cookies file?\n\n"
+            "This will switch to anonymous mode (public playlists only).\n\n"
+            "Note: If your account was rate-limited or blocked by YouTube,\n"
+            "clearing cookies and waiting before using the tool again may help.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                self.auth_manager.clear_cookies()
+                self.log("Cookies cleared - now in anonymous mode")
+                self.update_auth_status()
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Cookies cleared successfully!\n\n"
+                    "You are now in anonymous mode and can only access public content.\n\n"
+                    "To avoid rate limiting:\n"
+                    "• Use 'Fast' mode when possible\n"
+                    "• Reduce parallel workers (Settings: 2-3 instead of 5)\n"
+                    "• Add delays between operations"
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to clear cookies:\n{str(e)}")
+
+    def clear_oauth(self):
+        """Clear OAuth token."""
+        reply = QMessageBox.question(
+            self,
+            "Clear OAuth",
+            "Are you sure you want to clear the OAuth token?\n\n"
+            "You will need to re-authenticate to use OAuth again.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                self.auth_manager.clear_oauth()
+                self.log("OAuth token cleared")
+                self.update_auth_status()
+                QMessageBox.information(self, "Success", "OAuth token cleared successfully")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to clear OAuth:\n{str(e)}")
+
     def update_auth_status(self):
         """Update authentication status labels."""
         status = self.auth_manager.get_auth_status()
@@ -1180,6 +1655,13 @@ class MainWindow(QMainWindow):
         else:
             self.oauth_status_label.setText("✗ Not configured")
             self.oauth_status_label.setStyleSheet("color: red;")
+
+        if status['archive_org']:
+            self.archive_status_label.setText("✓ Configured")
+            self.archive_status_label.setStyleSheet("color: green;")
+        else:
+            self.archive_status_label.setText("✗ Not configured")
+            self.archive_status_label.setStyleSheet("color: red;")
 
     def log(self, message: str):
         """Add a message to the log."""

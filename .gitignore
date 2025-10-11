@@ -40,6 +40,7 @@ downloads/
 cookies.txt
 client_secrets.json
 oauth_token.json
+www.youtube.com_cookies.txt
 
 # OS
 .DS_Store

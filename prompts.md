@@ -168,9 +168,80 @@ This document contains all user prompts/requests during the development of this 
 **Prompt 29:**
 > still showing only unanailable video but no video id after downloading full metadata playlist
 
----
-
-## Final Documentation Update
-
 **Prompt 30:**
 > great now it works, update all files before we end for now
+
+---
+
+## Version 1.1.0 Release
+
+**Prompt 31:**
+> create new minor release v1.1.0
+
+---
+
+## External Repository Analysis
+
+**Prompt 32:**
+> analyze this repo - https://github.com/mattwright324/youtube-metadata is there anything that we can get by using this repo for metadata?
+
+**Prompt 33:**
+> save this as report in md file
+
+---
+
+## Documentation Updates
+
+**Prompt 34:**
+> update prompts and claude.md
+
+---
+
+## Archive.org Integration
+
+**Prompt 35:**
+> add option to upload selected files to archive.org, how would you do it? make a plan and ask me additional questions
+
+**Prompt 36:**
+> do research first and make a plan
+
+**Prompt 37:**
+> A
+
+**Prompt 38:**
+> update al and give me summary, write also prompts.md
+
+---
+
+## Rate Limiting & Anonymous Mode
+
+**Prompt 39:**
+> there should be way to unload cookies, my youtube account got blocked and it could be due to using this tool too much so I would like also to have anonymous mode where I download everything that is public on youtube without using cookies also
+
+**Prompt 40:**
+> I entered my s3 access and secret key in gui but got error that my account is not found, how can we test just webarchive module if it works as expected
+
+**Prompt 41:**
+> aha, so I need to download video first then archive it? Is there also way to archive it via youtube link only?
+
+**Prompt 42:**
+> archive is not allowing me to upload because video is still available on youtube, this is not how this tool should work, it should archive no matter what if I give it archive command
+
+**Prompt 43:**
+> add feature to open video, audio or comment file via context menu. it shoul just start defualt os viewer for those files
+
+---
+
+## Upload Progress Tracking
+
+**Prompt 44:**
+> I started archiving one file, is there way to get some progress info in gui and in cli? in cli there is nothing but I would like to see output there. just tell me if it is possible and how
+
+**Prompt 45:**
+> is there a way for you to measure how much data you are sending out and measure that as way to get some progress?
+
+**Prompt 46:**
+> make a detailed plan and save it as md file
+
+**Prompt 47:**
+> go for it

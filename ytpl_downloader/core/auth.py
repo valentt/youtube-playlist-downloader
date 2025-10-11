@@ -30,6 +30,7 @@ class AuthManager:
         self.cookies_file = self.config_dir / 'cookies.txt'
         self.oauth_token_file = self.config_dir / 'oauth_token.json'
         self.oauth_credentials_file = self.config_dir / 'client_secrets.json'
+        self.ia_config_file = Path.home() / '.config' / 'ia.ini'
 
     def has_cookies(self) -> bool:
         """Check if cookies file exists."""
@@ -162,4 +163,102 @@ class AuthManager:
         return {
             'cookies': self.has_cookies(),
             'oauth': self.has_oauth(),
+            'archive_org': self.has_archive_org(),
         }
+
+    # Archive.org authentication methods
+
+    def has_archive_org(self) -> bool:
+        """
+        Check if archive.org credentials are configured.
+
+        Checks for either ia.ini config file or environment variables.
+        """
+        # Check for config file
+        if self.ia_config_file.exists():
+            return True
+
+        # Check for environment variables
+        has_env_vars = (
+            os.environ.get('IA_ACCESS_KEY_ID') and
+            os.environ.get('IA_SECRET_ACCESS_KEY')
+        )
+        return bool(has_env_vars)
+
+    def configure_archive_org(self, access_key: str, secret_key: str) -> None:
+        """
+        Configure archive.org credentials using the internetarchive library.
+
+        Args:
+            access_key: Archive.org S3 access key (from https://archive.org/account/s3.php)
+            secret_key: Archive.org S3 secret key
+
+        Raises:
+            ImportError: If internetarchive library is not installed
+        """
+        try:
+            from internetarchive import configure
+        except ImportError:
+            raise ImportError(
+                "internetarchive library is not installed. "
+                "Install it with: pip install internetarchive>=5.4.2"
+            )
+
+        # Configure using the library (saves to ~/.config/ia.ini)
+        configure(access_key, secret_key)
+        print(f"Archive.org credentials configured successfully")
+        print(f"Config file: {self.ia_config_file}")
+
+    def get_archive_org_credentials(self) -> Optional[Dict[str, str]]:
+        """
+        Get archive.org credentials if configured.
+
+        Returns:
+            Dictionary with 'access' and 'secret' keys, or None if not configured
+        """
+        # First check environment variables
+        access_env = os.environ.get('IA_ACCESS_KEY_ID')
+        secret_env = os.environ.get('IA_SECRET_ACCESS_KEY')
+
+        if access_env and secret_env:
+            return {
+                'access': access_env,
+                'secret': secret_env,
+            }
+
+        # Then check config file
+        if not self.ia_config_file.exists():
+            return None
+
+        try:
+            # Read the ia.ini config file
+            import configparser
+            config = configparser.ConfigParser()
+            config.read(self.ia_config_file)
+
+            if 's3' in config:
+                access_key = config['s3'].get('access')
+                secret_key = config['s3'].get('secret')
+
+                if access_key and secret_key:
+                    return {
+                        'access': access_key,
+                        'secret': secret_key,
+                    }
+        except Exception as e:
+            print(f"Error reading archive.org config: {e}")
+            return None
+
+        return None
+
+    def clear_archive_org(self) -> None:
+        """
+        Remove archive.org credentials.
+
+        Only removes the config file, not environment variables.
+        """
+        if self.ia_config_file.exists():
+            self.ia_config_file.unlink()
+            print("Archive.org credentials removed")
+        else:
+            print("No archive.org config file found")

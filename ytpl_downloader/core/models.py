@@ -22,6 +22,15 @@ class DownloadStatus(str, Enum):
     FAILED = "failed"
 
 
+class ArchiveStatus(str, Enum):
+    """Archive.org upload status of a video."""
+    NOT_ARCHIVED = "not_archived"
+    UPLOADING = "uploading"
+    ARCHIVED = "archived"
+    FAILED = "failed"
+    SKIPPED = "skipped"  # Already exists on IA by someone else
+
+
 @dataclass
 class StatusChange:
     """Represents a status change event for a video."""
@@ -65,6 +74,13 @@ class VideoMetadata:
     audio_path: Optional[str] = None
     comments_path: Optional[str] = None
 
+    # Archive.org tracking
+    archive_status: ArchiveStatus = ArchiveStatus.NOT_ARCHIVED
+    archive_identifier: Optional[str] = None  # e.g., "youtube-dQw4w9WgXcQ"
+    archive_url: Optional[str] = None  # Full URL to archive.org item
+    archive_date: Optional[str] = None  # ISO format timestamp
+    archive_error: Optional[str] = None  # Last error message if failed
+
     # Timestamps
     first_seen: str = field(default_factory=lambda: datetime.now().isoformat())
     last_checked: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -78,6 +94,7 @@ class VideoMetadata:
         data = asdict(self)
         data['status'] = self.status.value
         data['download_status'] = self.download_status.value
+        data['archive_status'] = self.archive_status.value
         return data
 
     @classmethod
@@ -88,6 +105,8 @@ class VideoMetadata:
             data['status'] = VideoStatus(data['status'])
         if 'download_status' in data and isinstance(data['download_status'], str):
             data['download_status'] = DownloadStatus(data['download_status'])
+        if 'archive_status' in data and isinstance(data['archive_status'], str):
+            data['archive_status'] = ArchiveStatus(data['archive_status'])
 
         # Convert status_history dicts to StatusChange objects
         if 'status_history' in data:
