@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .models import PlaylistMetadata, VideoMetadata, VideoStatus
 from .auth import AuthManager
+from .filmot_enricher import FilmotEnricher
 
 
 class PlaylistFetcher:
@@ -21,6 +22,7 @@ class PlaylistFetcher:
             auth_manager: AuthManager instance for authentication
         """
         self.auth_manager = auth_manager or AuthManager()
+        self.filmot = FilmotEnricher()
 
     def fetch_playlist(
         self,
@@ -410,10 +412,27 @@ class PlaylistFetcher:
                 detailed.status_history = video.status_history
                 detailed.playlist_index = video.playlist_index
 
+                # If video is unavailable, try Filmot enrichment
+                if detailed.status in [VideoStatus.DELETED, VideoStatus.UNAVAILABLE, VideoStatus.PRIVATE]:
+                    print(f"  [INFO] Video unavailable, trying Filmot enrichment...")
+                    enriched, was_enriched = self.filmot.enrich_video_metadata(detailed)
+                    if was_enriched:
+                        detailed = enriched
+                        print(f"  [OK] Enriched from Filmot: {detailed.title[:50]}")
+                    else:
+                        print(f"  [INFO] Not found in Filmot archive")
+
                 playlist.videos[video_id] = detailed
                 print(f"  [OK] Enriched successfully")
             else:
-                print(f"  [SKIP] Failed to fetch metadata")
+                # Failed to fetch from YouTube, try Filmot as fallback
+                print(f"  [INFO] YouTube fetch failed, trying Filmot enrichment...")
+                enriched, was_enriched = self.filmot.enrich_video_metadata(video)
+                if was_enriched:
+                    playlist.videos[video_id] = enriched
+                    print(f"  [OK] Enriched from Filmot: {enriched.title[:50]}")
+                else:
+                    print(f"  [SKIP] Failed to fetch metadata (not in Filmot archive)")
 
         print(f"\nEnrichment complete! Updated {total_videos} videos.\n")
         return playlist

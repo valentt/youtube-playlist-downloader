@@ -17,12 +17,16 @@ from .storage import PlaylistStorage
 class UploadProgress:
     """Tracks upload progress with two phases: caching and uploading."""
 
-    def __init__(self, filename: str, file_size: int):
+    def __init__(self, filename: str, file_size: int, attempt: int = 1, total_attempts: int = 1):
         self.filename = filename
         self.file_size = file_size
         self.bytes_sent = 0
         self.start_time = time.time()
         self.last_update_time = time.time()
+
+        # Retry tracking
+        self.attempt = attempt
+        self.total_attempts = total_attempts
 
         # Phase tracking (caching vs uploading)
         self.phase = "caching"  # "caching" or "uploading"
@@ -129,10 +133,13 @@ class UploadProgress:
     @property
     def status_message(self) -> str:
         """Get current phase status message."""
-        if self.phase == "caching":
-            return "Caching"
+        base_status = "Caching" if self.phase == "caching" else "Uploading"
+
+        # Add retry info if this is a retry attempt
+        if self.total_attempts > 1:
+            return f"{base_status} (attempt {self.attempt}/{self.total_attempts})"
         else:
-            return "Uploading"
+            return base_status
 
     @property
     def bytes_in_current_phase(self) -> int:
@@ -295,12 +302,58 @@ class ArchiveManager:
                 # Get item
                 item = get_item(identifier)
 
+                # On retry, check if files already exist on server (upload may have completed despite error)
+                if attempt > 0:
+                    # Refresh item metadata from server
+                    item.refresh()
+
+                    # Check which files are already uploaded
+                    files_already_uploaded = []
+                    for remote_name in list(files_to_upload.keys()):
+                        if remote_name in [f['name'] for f in item.files]:
+                            files_already_uploaded.append(remote_name)
+                            # Remove from upload list
+                            del files_to_upload[remote_name]
+
+                    if files_already_uploaded:
+                        if progress_callback:
+                            progress_callback(
+                                f"Found {len(files_already_uploaded)} file(s) already uploaded",
+                                0, 0, 0.0, 0, "Skipping duplicates"
+                            )
+
+                    # If all files already uploaded, we're done!
+                    if not files_to_upload:
+                        archive_url = f"https://archive.org/details/{identifier}"
+                        video.archive_status = ArchiveStatus.ARCHIVED
+                        video.archive_identifier = identifier
+                        video.archive_url = archive_url
+                        video.archive_date = datetime.now().isoformat()
+                        video.archive_error = None
+
+                        # Cleanup temp file
+                        try:
+                            os.unlink(temp_metadata_path)
+                        except:
+                            pass
+
+                        return (True, f"Archived successfully (files already on server): {archive_url}")
+
+                    # Notify about remaining files to retry
+                    if progress_callback:
+                        progress_callback(
+                            f"RETRY ATTEMPT {attempt + 1}/{retries} - {len(files_to_upload)} file(s) remaining",
+                            0, 0, 0.0, 0, "Retrying"
+                        )
+
                 # Upload files
                 self._upload_files(
                     item=item,
                     files=files_to_upload,
                     metadata=ia_metadata,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    attempt=attempt + 1,
+                    total_attempts=retries
                 )
 
                 # Success!
@@ -323,6 +376,13 @@ class ArchiveManager:
                 error_msg = str(e)
 
                 if attempt < retries - 1:
+                    # Notify about error and upcoming retry
+                    if progress_callback:
+                        progress_callback(
+                            f"Error: {error_msg[:50]}...",
+                            0, 0, 0.0, 0, f"Failed - Retrying in {(2 ** attempt) * 30}s"
+                        )
+
                     # Wait before retry (exponential backoff)
                     sleep_time = (2 ** attempt) * 30  # 30s, 60s, 120s
                     time.sleep(sleep_time)
@@ -674,7 +734,9 @@ class ArchiveManager:
         item: Any,
         files: Dict[str, str],
         metadata: Dict[str, Any],
-        progress_callback: Optional[Callable[[str, int, int, float, int, str], None]] = None
+        progress_callback: Optional[Callable[[str, int, int, float, int, str], None]] = None,
+        attempt: int = 1,
+        total_attempts: int = 3
     ) -> None:
         """
         Upload files to archive.org item with progress tracking.
@@ -684,6 +746,8 @@ class ArchiveManager:
             files: Dictionary mapping remote filename to local filepath
             metadata: Item metadata
             progress_callback: Function(filename, bytes_sent, total_bytes, speed_mbps, percentage, status) for progress updates
+            attempt: Current attempt number (1-based)
+            total_attempts: Total number of retry attempts
         """
         # Upload each file individually with progress tracking
         for remote_name, local_path in files.items():
@@ -694,19 +758,20 @@ class ArchiveManager:
 
             file_size = filepath.stat().st_size
 
-            # Create progress tracker
-            progress = UploadProgress(remote_name, file_size)
+            # Create progress tracker with attempt info
+            progress = UploadProgress(remote_name, file_size, attempt, total_attempts)
 
             # Wrap file with progress tracking
             with ProgressFileWrapper(filepath, progress, progress_callback) as wrapped_file:
                 # Upload single file with wrapped progress
                 # Note: internetarchive library accepts file-like objects
+                # Reduce internal retries since we have outer retry loop
                 response = item.upload(
                     {remote_name: wrapped_file},
                     metadata=metadata if remote_name == list(files.keys())[0] else {},
                     verbose=False,
-                    retries=3,
-                    retries_sleep=30,
+                    retries=1,  # Reduced from 3 - let our outer loop handle retries
+                    retries_sleep=10,
                     checksum=True,
                     queue_derive=False  # Only derive after all files uploaded
                 )

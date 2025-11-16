@@ -673,6 +673,79 @@ def archive_status_cmd(ctx, playlist_id, verbose):
         click.echo(click.style(f'\n[FAIL] Error: {e}', fg='red'))
 
 
+@cli.command('filmot-enrich')
+@click.argument('playlist_id')
+@click.option('--status', type=click.Choice(['deleted', 'private', 'unavailable', 'all']), default='all', help='Enrich only videos with specific status')
+@click.pass_context
+def filmot_enrich(ctx, playlist_id, status):
+    """Enrich deleted/unavailable videos with metadata from Filmot.com archive."""
+    storage = ctx.obj['storage']
+    fetcher = ctx.obj['fetcher']
+
+    try:
+        # Load playlist
+        playlist = storage.load_playlist(playlist_id)
+        if not playlist:
+            click.echo(click.style(f'[FAIL] Playlist {playlist_id} not found', fg='red'))
+            return
+
+        # Filter videos by status
+        videos_to_enrich = []
+        if status == 'all':
+            # All unavailable videos
+            videos_to_enrich = [
+                v for v in playlist.videos.values()
+                if v.status in [VideoStatus.DELETED, VideoStatus.UNAVAILABLE, VideoStatus.PRIVATE]
+            ]
+        else:
+            # Specific status
+            status_enum = VideoStatus(status.upper() if status != 'unavailable' else 'UNAVAILABLE')
+            videos_to_enrich = [v for v in playlist.videos.values() if v.status == status_enum]
+
+        if not videos_to_enrich:
+            click.echo(f'No videos match the criteria (status: {status})')
+            return
+
+        click.echo(f'\nEnriching {len(videos_to_enrich)} video(s) from Filmot.com archive...\n')
+
+        # Enrich each video
+        enriched_count = 0
+        not_found_count = 0
+
+        for i, video in enumerate(videos_to_enrich, 1):
+            display_title = video.title[:60] + '...' if len(video.title) > 60 else video.title
+            click.echo(f'[{i}/{len(videos_to_enrich)}] {display_title}')
+
+            # Try Filmot enrichment
+            enriched, was_enriched = fetcher.filmot.enrich_video_metadata(video)
+
+            if was_enriched:
+                # Update in playlist
+                playlist.videos[video.video_id] = enriched
+                click.echo(click.style(f'  [OK] Enriched: {enriched.title[:60]}', fg='green'))
+                enriched_count += 1
+            else:
+                click.echo(click.style(f'  [SKIP] Not found in Filmot archive', fg='yellow'))
+                not_found_count += 1
+
+        # Save playlist
+        if enriched_count > 0:
+            storage.save_playlist(playlist, create_version=False)
+
+        # Summary
+        click.echo(f'\nSummary:')
+        click.echo(f'  Total: {len(videos_to_enrich)}')
+        click.echo(f'  {click.style(f"Enriched: {enriched_count}", fg="green")}')
+        click.echo(f'  {click.style(f"Not found: {not_found_count}", fg="yellow")}')
+
+        if enriched_count > 0:
+            click.echo(f'\n{click.style("✓", fg="green")} Playlist updated with Filmot metadata!')
+            click.echo('\nNote: Enriched metadata is marked with [ARCHIVED FROM FILMOT] in the description.')
+
+    except Exception as e:
+        click.echo(click.style(f'\n[FAIL] Error: {e}', fg='red'))
+
+
 def main():
     """Main entry point for CLI."""
     cli(obj={})

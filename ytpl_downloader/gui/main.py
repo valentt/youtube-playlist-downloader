@@ -1289,11 +1289,24 @@ class MainWindow(QMainWindow):
                 detailed.status_history = video.status_history
                 detailed.playlist_index = video.playlist_index
 
+                # If video is unavailable, try Filmot enrichment
+                if detailed.status in [VideoStatus.DELETED, VideoStatus.UNAVAILABLE, VideoStatus.PRIVATE]:
+                    self.log(f"Video unavailable, trying Filmot enrichment...")
+                    enriched, was_enriched = self.fetcher.filmot.enrich_video_metadata(detailed)
+                    if was_enriched:
+                        detailed = enriched
+                        self.log(f"Enriched from Filmot: {detailed.title[:50]}")
+
                 # Update in current playlist
                 self.current_playlist.videos[video_id] = detailed
 
                 # Save playlist
                 self.storage.save_playlist(self.current_playlist, create_version=False)
+
+                # Reload from storage to get persisted data
+                reloaded = self.storage.load_playlist(self.current_playlist.playlist_id)
+                if reloaded:
+                    self.current_playlist = reloaded
 
                 self.log(f"Video metadata enriched: {detailed.title}")
                 self.statusBar().showMessage("Video metadata enriched successfully")
@@ -1307,13 +1320,28 @@ class MainWindow(QMainWindow):
                     f"Detailed metadata fetched for:\n{detailed.title}"
                 )
             else:
-                self.log(f"Failed to fetch metadata for video: {video_id}")
-                self.statusBar().showMessage("Failed to fetch video metadata")
-                QMessageBox.warning(
-                    self,
-                    "Warning",
-                    "Failed to fetch detailed metadata for this video."
-                )
+                # Failed to fetch from YouTube, try Filmot as fallback
+                self.log(f"YouTube fetch failed, trying Filmot enrichment...")
+                enriched, was_enriched = self.fetcher.filmot.enrich_video_metadata(video)
+                if was_enriched:
+                    self.current_playlist.videos[video_id] = enriched
+                    self.storage.save_playlist(self.current_playlist, create_version=False)
+                    self.log(f"Enriched from Filmot: {enriched.title[:50]}")
+                    self.statusBar().showMessage("Video metadata enriched from Filmot")
+                    self.display_playlist()
+                    QMessageBox.information(
+                        self,
+                        "Success",
+                        f"Metadata recovered from Filmot archive:\n{enriched.title}"
+                    )
+                else:
+                    self.log(f"Failed to fetch metadata for video: {video_id}")
+                    self.statusBar().showMessage("Failed to fetch video metadata")
+                    QMessageBox.warning(
+                        self,
+                        "Warning",
+                        "Failed to fetch detailed metadata for this video.\nNot found in Filmot archive."
+                    )
 
         except Exception as e:
             self.log(f"Error fetching video metadata: {str(e)}")
