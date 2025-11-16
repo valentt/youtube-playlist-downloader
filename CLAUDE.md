@@ -353,7 +353,7 @@ Playlist folders now use format: `"Channel - PlaylistName"` instead of playlist 
 - `save_playlist()` - auto-renames folders with collision detection
 - `migrate_to_human_friendly_names()` - one-time migration for existing folders
 
-**Migration Script:** `migrate_folders.py` - renames existing playlist folders
+**Migration Script:** `scripts/migrate_folders.py` - renames existing playlist folders
 
 ### Enrichment Improvements
 - Skip placeholder IDs (`unavailable_*`, `unknown_*`, `invalid_*`) during enrichment
@@ -553,9 +553,13 @@ Right-click any video to open downloaded files with default OS viewer:
 
 ## External Resources
 
-**youtube-metadata-analysis.md**: Analysis of potential Filmot.com integration for deleted video metadata recovery. See this file for future enhancement opportunities.
+**docs/youtube-metadata-analysis.md**: Analysis of potential Filmot.com integration for deleted video metadata recovery. See this file for future enhancement opportunities.
 
-**archive-org-integration-plan.md**: Detailed implementation plan for archive.org integration including research, architecture decisions, and testing strategy.
+**docs/archive-org-integration-plan.md**: Detailed implementation plan for archive.org integration including research, architecture decisions, and testing strategy.
+
+**docs/archive-upload-progress-plan.md**: Detailed implementation plan for upload progress tracking.
+
+**docs/archival-options-idea.md**: Research on future archival backend options (IPFS, Arweave, PeerTube, etc.).
 
 ## Important Notes
 
@@ -566,7 +570,7 @@ Right-click any video to open downloaded files with default OS viewer:
 - **Downloads** resume automatically if interrupted
 - **Version history** only created if there are actual changes
 - **Fast mode** doesn't capture error messages - use detailed for archival
-- **Migration script** (`migrate_folders.py`) can be deleted after first run
+- **Migration script** (`scripts/migrate_folders.py`) can be deleted after first run
 - **Archive.org credentials** obtained from https://archive.org/account/s3.php
 - **Archive.org uploads** use `internetarchive>=5.4.2` library (security-patched version)
 - remember to use powershell --command
